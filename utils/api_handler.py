@@ -1,28 +1,31 @@
-import requests
 import csv
 import os
+import requests
 
 API_URL = "https://dummyjson.com/products?limit=100"
 
 # ============================================================
-# 1. Fetch products from API
+# 1. Fetch API products
 # ============================================================
 
 def fetch_all_products():
+    """
+    Fetches products from DummyJSON API
+    """
     try:
         response = requests.get(API_URL, timeout=10)
         response.raise_for_status()
         data = response.json()
         products = data.get("products", [])
         print(f"SUCCESS: Fetched {len(products)} products from API")
-        # Use .get() with defaults to avoid KeyError
+        # Use .get() to avoid KeyErrors
         return [
             {
                 "id": p.get("id"),
                 "title": p.get("title", "Unknown Product"),
-                "category": p.get("category", "miscellaneous"),
-                "brand": p.get("brand", "Generic"),
-                "rating": p.get("rating", 4.0)
+                "category": p.get("category", None),
+                "brand": p.get("brand", None),
+                "rating": p.get("rating", None)
             }
             for p in products
         ]
@@ -31,31 +34,23 @@ def fetch_all_products():
         return []
 
 # ============================================================
-# 2. Create product mapping
+# 2. Create mapping from numeric ID → product info
 # ============================================================
 
 def create_product_mapping(api_products):
-    """
-    Creates mapping from normalized title → product info
-    """
-    title_map = {}
-    id_map = {}
-
+    mapping = {}
     for p in api_products:
-        key = p["title"].lower().replace(" ", "")
-        title_map[key] = p
-        id_map[p["id"]] = p
-
-    return {"by_title": title_map, "by_id": id_map}
+        if p.get("id") is not None:
+            mapping[p["id"]] = p
+    return mapping
 
 # ============================================================
-# 3. Enrich sales transactions (force-match for all products)
+# 3. Enrich transactions
 # ============================================================
 
 def enrich_sales_data(transactions, product_mapping):
     """
-    Enrich transactions with API product info.
-    If no match, assign a generic dummy mapping for demonstration.
+    Enriches transaction data with API product information
     """
     enriched = []
 
@@ -63,42 +58,34 @@ def enrich_sales_data(transactions, product_mapping):
         tx_enriched = tx.copy()
         api_product = None
 
-        # Attempt 1: Numeric ID match
+        # Extract numeric ID from ProductID (P101 -> 101)
         try:
             numeric_id = int("".join(filter(str.isdigit, tx["ProductID"])))
-            api_product = product_mapping["by_id"].get(numeric_id)
+            api_product = product_mapping.get(numeric_id)
         except ValueError:
-            pass
+            api_product = None
 
-        # Attempt 2: Partial name match
-        if not api_product:
-            csv_name = tx["ProductName"].lower().replace(" ", "")
-            for key, val in product_mapping["by_title"].items():
-                if csv_name in key or key in csv_name:
-                    api_product = val
-                    break
-
-        # ====================================================
-        # Force enrichment if no API product found
-        # ====================================================
-        if not api_product:
-            api_product = {
-                "category": "miscellaneous",
-                "brand": "Generic",
-                "rating": 4.0
-            }
-
-        tx_enriched["API_Category"] = api_product.get("category")
-        tx_enriched["API_Brand"] = api_product.get("brand")
-        tx_enriched["API_Rating"] = api_product.get("rating")
-        tx_enriched["API_Match"] = True  # Always True now
+        # Set API fields
+        if api_product:
+            tx_enriched["API_Category"] = api_product.get("category")
+            tx_enriched["API_Brand"] = api_product.get("brand")
+            tx_enriched["API_Rating"] = api_product.get("rating")
+            tx_enriched["API_Match"] = True
+        else:
+            tx_enriched["API_Category"] = None
+            tx_enriched["API_Brand"] = None
+            tx_enriched["API_Rating"] = None
+            tx_enriched["API_Match"] = False
 
         enriched.append(tx_enriched)
+
+    # Save to file
+    save_enriched_data(enriched)
 
     return enriched
 
 # ============================================================
-# 4. Save enriched data
+# 4. Save enriched data to pipe-delimited file
 # ============================================================
 
 def save_enriched_data(enriched_transactions, filename="data/enriched_sales_data.txt"):
@@ -118,7 +105,14 @@ def save_enriched_data(enriched_transactions, filename="data/enriched_sales_data
         writer = csv.writer(f, delimiter="|")
         writer.writerow(headers)
         for tx in enriched_transactions:
-            writer.writerow([tx.get(h, "") for h in headers])
+            row = []
+            for h in headers:
+                value = tx.get(h)
+                # Keep None as literal "None", booleans stay as True/False
+                if value is None:
+                    value = "None"
+                row.append(value)
+            writer.writerow(row)
 
     print(f"SUCCESS: Enriched data saved to {filename}")
 
@@ -127,8 +121,8 @@ def save_enriched_data(enriched_transactions, filename="data/enriched_sales_data
 # ============================================================
 
 def main():
+    # Load cleaned sales data
     transactions = []
-
     try:
         with open("output/cleaned_sales_data.csv", "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -147,11 +141,16 @@ def main():
         print("ERROR: cleaned_sales_data.csv not found")
         return
 
+    # Fetch API data and create mapping
     api_products = fetch_all_products()
     product_mapping = create_product_mapping(api_products)
 
-    enriched = enrich_sales_data(transactions, product_mapping)
-    save_enriched_data(enriched)
+    # Enrich and save
+    enriched_transactions = enrich_sales_data(transactions, product_mapping)
+
+    # Print sample
+    print("\nSample enriched transaction:")
+    print(enriched_transactions[0])
 
 if __name__ == "__main__":
     main()
